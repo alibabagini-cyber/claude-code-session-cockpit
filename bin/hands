@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""hands — 손 든 세션 목록. ~/.claude/fleet-status/*.json (fleet-hook 이 기록) 을 읽는다.
+사용: hands            🏁 닫아도 됨 + ✋ 대기(내 입력/결정 필요) 만, 오래 기다린 순
+      hands --all      ⏳ 작업 중까지 전부
+      hands --json     원본 JSON 배열
+🏁 = 세션이 "작업 완료·후속 없음"을 스스로 선언(마지막 답변 끝 `🏁 닫아도 됨 — 사유`) → 닫아도 되는 창.
+"""
+import json, os, sys, time
+
+ROOT = os.path.expanduser("~/.claude/fleet-status")
+MARK = {"WORKING": "⏳", "DONE": "✋", "NEEDS-INPUT": "✋", "READY": "○", "CLOSE-OK": "🏁"}
+rows = []
+for n in (os.listdir(ROOT) if os.path.isdir(ROOT) else []):
+    if not n.endswith(".json"):
+        continue
+    try:
+        r = json.load(open(os.path.join(ROOT, n)))
+    except Exception:
+        continue
+    r["sid"] = n[:-5][:8]
+    rows.append(r)
+
+if "--json" in sys.argv:
+    print(json.dumps(rows, ensure_ascii=False, indent=1))
+    sys.exit(0)
+
+show_all = "--all" in sys.argv
+now = time.time()
+close = sorted([r for r in rows if r.get("state") == "CLOSE-OK"], key=lambda r: r.get("ts", 0))
+wait = sorted([r for r in rows if r.get("state") in ("DONE", "NEEDS-INPUT")], key=lambda r: r.get("ts", 0))
+work = sorted([r for r in rows if r.get("state") == "WORKING"], key=lambda r: r.get("ts", 0))
+
+
+def line(r):
+    age = int((now - r.get("ts", now)) / 60)
+    title = (r.get("title") or r.get("project") or "?")[:34]
+    task = (r.get("task") or "")[:44].replace("\n", " ")
+    return f"{MARK.get(r['state'], '?')} {age:>4}분  {title:<34}  {r['sid']}  ← {task}"
+
+
+print(f"🏁 닫아도 됨 {len(close)}  ✋ 대기 {len(wait)}  ⏳ 작업중 {len(work)}   ({time.strftime('%H:%M')})")
+for r in close:
+    print(line(r))
+if close and wait:
+    print("--")
+for r in wait:
+    print(line(r))
+if show_all:
+    print("--")
+    for r in work:
+        print(line(r))

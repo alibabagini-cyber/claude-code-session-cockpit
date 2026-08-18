@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""fleet-hook — Claude Code 훅 수집기. 세션별 상태를 ~/.claude/fleet-status/<session_id>.json 에 기록하고,
+그 세션의 터미널 창 제목을 상태 마커로 갈아끼운다(⏳ 작업중 / ✋ 대기 / 🔐 권한대기 / 🏁 닫아도 됨 / ○ 준비).
+대기 상태로 바뀌면 (Windows/WSL) 창을 깜빡여 손을 들게 한다.
+
+settings.json 의 SessionStart / UserPromptSubmit / Notification / Stop / SessionEnd 훅이 호출한다.
+이벤트명은 argv[1] 우선, 없으면 stdin JSON 의 hook_event_name.
+"""
+import json, os, sys, time
+
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+
+STATE = {
+    "SessionStart": "READY",
+    "UserPromptSubmit": "WORKING",
+    "Notification": "NEEDS-INPUT",
+    "Stop": "DONE",
+    "SessionEnd": None,
+}
+ev = sys.argv[1] if len(sys.argv) > 1 else d.get("hook_event_name")
+if ev not in STATE:
+    sys.exit(0)
+
+ROOT = os.path.expanduser("~/.claude/fleet-status")
+os.makedirs(ROOT, exist_ok=True)
+sid = d.get("session_id") or "unknown"
+path = os.path.join(ROOT, sid + ".json")
+
+if ev == "SessionEnd":
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    sys.exit(0)
+
+detail = (d.get("prompt") or d.get("message") or "").replace("\n", " ").strip()[:100]
+prev = {}
+if ev != "UserPromptSubmit":
+    try:
+        with open(path) as f:
+            prev = json.load(f)
+    except Exception:
+        pass
+rec = {
+    "state": STATE[ev],
+    "project": os.path.basename(d.get("cwd") or os.getcwd()) or "?",
+    "cwd": d.get("cwd") or prev.get("cwd") or os.getcwd(),
+    "task": detail if ev == "UserPromptSubmit" else prev.get("task", ""),
+    "note": detail if ev == "Notification" else "",
+    "ts": time.time(),
+}
+
+
+def read_tail(path_, n=400_000):
+    with open(path_, "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(max(0, size - n))
+        return f.read().decode("utf-8", "ignore")
+
+
+def session_title():
+    """제목 = /rename 한 custom-title > Claude가 붙인 ai-title > 환경변수 CLAUDE_SESSION_LABEL > 프로젝트 폴더명."""
+    title = os.environ.get("CLAUDE_SESSION_LABEL") or ""
+    try:
+        cust = ai = ""
+        for line in read_tail(d.get("transcript_path") or "").splitlines():
+            if line.startswith('{"type":"custom-title"'):
+                cust = json.loads(line).get("customTitle") or cust
+            elif line.startswith('{"type":"ai-title"'):
+                ai = json.loads(line).get("aiTitle") or ai
+        title = cust or ai or title
+    except Exception:
+        pass
+    return title or rec["project"]
+
+
+def close_ok():
+    """세션이 마지막 답변 끝에 🏁 마커('🏁 닫아도 됨 — 사유')를 남기면 '완료·닫아도 됨'으로 판정."""
+    try:
+        last = ""
+        for line in read_tail(d.get("transcript_path") or "", 200_000).splitlines():
+            if line.startswith('{"type":"assistant"'):
+                try:
+                    c = json.loads(line)["message"]["content"]
+                except Exception:
+                    continue
+                txt = c if isinstance(c, str) else " ".join(
+                    x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text")
+                if txt.strip():
+                    last = txt
+        return "🏁" in last[-400:]
+    except Exception:
+        return False
+
+
+def session_pts():
+    """훅 프로세스는 tty가 없다. 조상(claude 프로세스)의 stdout이 가리키는 /dev/pts/N 을 찾아 거기에 제목을 쓴다."""
+    pid = os.getppid()
+    for _ in range(6):
+        try:
+            fd1 = os.readlink(f"/proc/{pid}/fd/1")
+            if fd1.startswith("/dev/pts/"):
+                return fd1
+            st = open(f"/proc/{pid}/stat").read()
+            pid = int(st.rsplit(")", 1)[1].split()[1])
+        except Exception:
+            return None
+    return None
+
+
+MARK = {"WORKING": "⏳", "DONE": "✋", "NEEDS-INPUT": "✋", "READY": "○", "CLOSE-OK": "🏁"}
+title = session_title()
+if rec["state"] == "DONE" and close_ok():
+    rec["state"] = "CLOSE-OK"
+mark = MARK[rec["state"]]
+if rec["state"] == "NEEDS-INPUT" and "permission" in detail.lower():
+    mark = "🔐"
+rec["title"] = title
+with open(path, "w") as f:
+    json.dump(rec, f, ensure_ascii=False)
+
+pts = session_pts()
+if pts:
+    try:
+        with open(pts, "w") as t:
+            t.write(f"\033]0;{mark} {title}\007")
+            t.flush()
+    except Exception:
+        pass
+    flash = os.path.expanduser("~/.claude/cockpit/bin/win-flash")
+    if rec["state"] in ("DONE", "NEEDS-INPUT", "CLOSE-OK") and os.path.exists(flash):
+        import subprocess
+        subprocess.Popen([flash, title], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+
+if ev == "SessionStart":  # 24h 지난 잔재 정리
+    now = time.time()
+    for name in os.listdir(ROOT):
+        p = os.path.join(ROOT, name)
+        try:
+            if now - os.path.getmtime(p) > 86400:
+                os.remove(p)
+        except OSError:
+            pass

@@ -1,0 +1,46 @@
+#!/bin/bash
+# win-flash "<창 제목 일부>" — (WSL 전용) 제목에 그 문자열이 든 Windows Terminal 창을 깜빡인다(손들기).
+# FlashWindowEx(FLASHW_ALL|FLASHW_TIMERNOFG): 전면화·포커스 탈취 없음, 사용자가 그 창을 클릭하면 멈춤.
+# fleet-hook 이 대기 상태(✋/🔐/🏁)로 바뀔 때 자동 호출. 수동: win-flash 삼정 / win-flash --stop 삼정
+# 다른 터미널(예: Alacritty/VS Code)이면 아래 CLASS 를 그 창 클래스명으로 바꾸거나 빈 문자열(전 창)로.
+set -u
+CLASS="${WIN_FLASH_CLASS:-CASCADIA_HOSTING_WINDOW_CLASS}"
+STOP=0; [ "${1:-}" = "--stop" ] && { STOP=1; shift; }
+NEEDLE="${1:?title substring}"
+command -v powershell.exe >/dev/null 2>&1 || exit 0     # WSL 이 아니면 조용히 종료
+WTEMP="$(cmd.exe /c 'echo %TEMP%' 2>/dev/null | tr -d '\r')"
+[ -z "$WTEMP" ] && exit 0
+UTEMP="$(wslpath -u "$WTEMP")"
+printf '%s' "$NEEDLE" > "$UTEMP/win_flash_needle.txt"
+cat > "$UTEMP/win_flash.ps1" <<'EOF'
+param([int]$Stop=0, [string]$Class="CASCADIA_HOSTING_WINDOW_CLASS")
+Add-Type @"
+using System; using System.Text; using System.Runtime.InteropServices;
+public class WF {
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr l);
+  public delegate bool EnumWindowsProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [StructLayout(LayoutKind.Sequential)] public struct FLASHWINFO { public uint cbSize; public IntPtr hwnd; public uint dwFlags; public uint uCount; public uint dwTimeout; }
+  [DllImport("user32.dll")] public static extern bool FlashWindowEx(ref FLASHWINFO p);
+  public static System.Collections.Generic.List<string> List(string cls) {
+    var r = new System.Collections.Generic.List<string>();
+    EnumWindows((h,l)=>{ if(!IsWindowVisible(h)) return true; var c=new StringBuilder(256); GetClassName(h,c,256);
+      if(cls!="" && c.ToString()!=cls) return true; int n=GetWindowTextLength(h); var t=new StringBuilder(n+1); GetWindowText(h,t,n+1);
+      r.Add(h.ToInt64()+"|"+t.ToString()); return true; }, IntPtr.Zero);
+    return r; }
+  public static bool Flash(long h, bool stop) { var f=new FLASHWINFO(); f.cbSize=(uint)Marshal.SizeOf(f); f.hwnd=new IntPtr(h);
+    f.dwFlags = stop ? 0u : (3u | 12u); f.uCount=0; f.dwTimeout=0; return FlashWindowEx(ref f); }
+}
+"@
+$needle = (Get-Content -Raw -Encoding UTF8 "$env:TEMP\win_flash_needle.txt").Trim()
+if (-not $needle) { exit 0 }
+foreach ($w in [WF]::List($Class)) {
+  $parts = $w.Split('|',2)
+  if ($parts[1] -like "*$needle*") { [WF]::Flash([int64]$parts[0], [bool]$Stop) | Out-Null; "flash($Stop) $($parts[0])" }
+}
+EOF
+WPS1="$(wslpath -w "$UTEMP/win_flash.ps1")"
+(cd "$UTEMP" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$WPS1" -Stop $STOP -Class "$CLASS" 2>/dev/null | tr -d '\r' | grep -c "^flash" | sed 's/^/flashed windows: /')

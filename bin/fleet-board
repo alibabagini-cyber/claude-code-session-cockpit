@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""SESSION COCKPIT 보드 — ~/.claude/fleet-status/*.json을 2초마다 테이블로 렌더.
+사용: fleet-board (루프) / fleet-board --once (1회)"""
+import json, os, sys, time
+
+ROOT = os.path.expanduser("~/.claude/fleet-status")
+COLOR = {"WORKING": "\033[33m", "NEEDS-INPUT": "\033[31;1m", "DONE": "\033[32m", "READY": "\033[36m", "CLOSE-OK": "\033[35;1m"}
+RESET = "\033[0m"
+
+
+def age_str(sec):
+    if sec >= 3600:
+        return f"{sec // 3600}h{sec % 3600 // 60:02d}m"
+    if sec >= 60:
+        return f"{sec // 60}m{sec % 60:02d}s"
+    return f"{sec}s"
+
+
+def render():
+    rows = []
+    if os.path.isdir(ROOT):
+        for name in os.listdir(ROOT):
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(ROOT, name)) as f:
+                    rows.append(json.load(f))
+            except Exception:
+                continue
+    rows.sort(key=lambda r: -r.get("ts", 0))
+    now = time.time()
+    lines = [f" \033[1mSESSION COCKPIT\033[0m  {time.strftime('%H:%M:%S')}"]
+    lines.append(f" {'상태':<10} {'프로젝트':<20} {'경과':>7}  마지막 작업")
+    for r in rows:
+        st = r.get("state", "?")
+        c = COLOR.get(st, "")
+        task = r.get("note") or r.get("task") or ""
+        age = age_str(int(now - r.get("ts", now)))
+        lines.append(f" {c}{st:<11}{RESET} {r.get('project', '?'):<21.21} {age:>7}  {task}")
+    if not rows:
+        lines.append("  (활성 세션 없음 — 훅 설치 이후 시작한 세션부터 표시됨)")
+    print("\033[2J\033[H" + "\n".join(lines), flush=True)
+
+
+if "--once" in sys.argv:
+    render()
+else:
+    while True:
+        render()
+        time.sleep(2)
