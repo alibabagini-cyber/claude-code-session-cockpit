@@ -41,6 +41,8 @@ def line(r):
 print(f"🏁 닫아도 됨 {len(close)}  ✋ 대기 {len(wait)}  ⏳ 작업중 {len(work)}   ({time.strftime('%H:%M')})")
 for r in close:
     print(line(r))
+    if r.get("close_reason"):
+        print(f"        └ {r['close_reason'][:110]}")
 if close and wait:
     print("--")
 for r in wait:

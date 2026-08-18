@@ -85,7 +85,7 @@ def close_ok():
     try:
         last = ""
         for line in read_tail(d.get("transcript_path") or "", 200_000).splitlines():
-            if '"type":"assistant"' not in line[:200] and '"type": "assistant"' not in line[:200]:
+            if '"type":"assistant"' not in line and '"type": "assistant"' not in line:
                 continue
             try:
                 o = json.loads(line)
@@ -98,9 +98,13 @@ def close_ok():
                 x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text")
             if txt.strip():
                 last = txt
-        return "🏁" in last[-400:]
+        tail_txt = last[-400:]
+        if "🏁" not in tail_txt:
+            return None
+        reason = tail_txt[tail_txt.rfind("🏁"):].strip().splitlines()[0]
+        return reason[:160]
     except Exception:
-        return False
+        return None
 
 
 def session_pts():
@@ -120,8 +124,10 @@ def session_pts():
 
 MARK = {"WORKING": "⏳", "DONE": "✋", "NEEDS-INPUT": "✋", "READY": "○", "CLOSE-OK": "🏁"}
 title = session_title()
-if rec["state"] == "DONE" and close_ok():
+_close = close_ok() if rec["state"] == "DONE" else None
+if _close:
     rec["state"] = "CLOSE-OK"
+    rec["close_reason"] = _close
 mark = MARK[rec["state"]]
 if rec["state"] == "NEEDS-INPUT" and "permission" in detail.lower():
     mark = "🔐"
