@@ -68,10 +68,12 @@ def session_title():
     try:
         cust = ai = ""
         for line in read_tail(d.get("transcript_path") or "").splitlines():
-            if line.startswith('{"type":"custom-title"'):
-                cust = json.loads(line).get("customTitle") or cust
-            elif line.startswith('{"type":"ai-title"'):
-                ai = json.loads(line).get("aiTitle") or ai
+            if '"custom-title"' in line[:120]:
+                try: cust = json.loads(line).get("customTitle") or cust
+                except Exception: pass
+            elif '"ai-title"' in line[:120]:
+                try: ai = json.loads(line).get("aiTitle") or ai
+                except Exception: pass
         title = cust or ai or title
     except Exception:
         pass
@@ -83,15 +85,19 @@ def close_ok():
     try:
         last = ""
         for line in read_tail(d.get("transcript_path") or "", 200_000).splitlines():
-            if line.startswith('{"type":"assistant"'):
-                try:
-                    c = json.loads(line)["message"]["content"]
-                except Exception:
+            if '"type":"assistant"' not in line[:200] and '"type": "assistant"' not in line[:200]:
+                continue
+            try:
+                o = json.loads(line)
+                if o.get("type") != "assistant":
                     continue
-                txt = c if isinstance(c, str) else " ".join(
-                    x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text")
-                if txt.strip():
-                    last = txt
+                c = o["message"]["content"]
+            except Exception:
+                continue
+            txt = c if isinstance(c, str) else " ".join(
+                x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text")
+            if txt.strip():
+                last = txt
         return "🏁" in last[-400:]
     except Exception:
         return False
